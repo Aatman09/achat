@@ -1,0 +1,49 @@
+1. The PCIe Highway (CPU to GPU Transfers)
+Right now, your data transfer halts the entire script while it waits for the data to cross the motherboard. You can make this asynchronous and much faster.
+
+Pinned Memory (pin_memory): Standard System RAM is "pageable," meaning the OS can move it around. The GPU cannot safely pull pageable memory; the CPU has to first copy it to a temporary "locked" staging area, then send it. If you "pin" the memory, the GPU can bypass the CPU and pull it directly over the PCIe bus using Direct Memory Access (DMA).
+
+Asynchronous Transfers (non_blocking=True): You can tell PyTorch to send the data to the GPU in the background while the current step finishes its math.
+
+How to fix it in train.py:
+
+Python
+# Instead of this:
+# x, y = x.to(device), y.to(device)
+
+# Do this:
+x = x.pin_memory().to(device, non_blocking=True)
+y = y.pin_memory().to(device, non_blocking=True)
+
+
+2. The GPU Compute (Memory Alignment & Tensor Cores)
+You have a Tesla T4 (Turing architecture) which has physical hardware called Tensor Cores designed specifically for AI matrix math. But your code is accidentally forcing them to turn off in two places.
+
+Enable TF32 (or fast FP32): By default, PyTorch uses extremely strict 32-bit floats for matrix multiplications. You can tell PyTorch to trade a tiny, imperceptible bit of precision for a massive speedup on modern GPUs.
+
+How to fix it in train.py (put this right at the top under your imports):
+
+Python
+torch.set_float32_matmul_precision('high')
+Vocabulary Padding: In model.py, your vocab size is 50257. GPUs hate odd numbers; they read memory in blocks (usually chunks of 64 or 128 bytes). Because 50257 is jagged, the Tensor Cores refuse to process the embedding layer efficiently.
+
+How to fix it in model.py: Change vocab_size from 50257 to 50304. (50304 is the nearest multiple of 64). You will have a few "dead" neurons at the end of your matrix that never get fired, but the matrix math will be perfectly memory-aligned and significantly faster.
+
+3. The Optimizer (Memory Bandwidth)
+Your Optimizer is doing too many round trips to the slow VRAM.
+
+Fused AdamW: Standard AdamW iterates over every single parameter (all 124 million) one by one to update them. In PyTorch 2.0, you can fuse the entire AdamW update step into a single, massive C++ kernel. This drastically reduces the overhead of reading/writing to memory.
+
+How to fix it in train.py:
+
+Python
+# Add fused=True to your optimizer
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), fused=True)
+4. The Data Loader (The CPU Bottleneck)
+Your Dataloaderlite is entirely synchronous. It lives on the main Python thread.
+
+The Issue: While f.read() and enc.encode(txt) happen quickly for a small Shakespeare file, if you scale this up to 10GB of Wikipedia, your GPU will sit at 0% utilization for 10 minutes while the CPU reads and tokenizes the text.
+
+The Future Fix: You will eventually need to abandon your custom Dataloaderlite and use PyTorch's official torch.utils.data.DataLoader. The official loader allows you to set num_workers=4, which spins up 4 separate background CPU processes that pre-fetch, tokenize, and pin the memory for the next 4 batches while the GPU is busy training the current batch.
+
+If you implement the non_blocking, fused=True, and vocab padding tweaks today, you should see your tokens/second metric jump noticeably!

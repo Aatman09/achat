@@ -1,0 +1,36 @@
+Mesh_shape = tells the computer how the gpus organized 
+             if you have 8 gpus we can change the mesh 
+             shape to (2, 4) means 2 row(data parallesim)
+             4 columns tensor parallesim 
+
+
+ 1. Data Parallelism (DP): "The Factory Line"
+  In DP, you take your entire model and copy-paste it onto every GPU.
+   * The Strategy: You split the Data (the batch). If you have 8 GPUs and a
+     batch size of 64, each GPU gets 8 sentences.
+   * The Math: Every GPU calculates its own gradients independently. At the
+     end of the step, they all "talk" to each other (All-Reduce) to average
+     their gradients and update the weights.
+   * The "Why" (System Side): DP is the easiest to implement. It is great
+     for increasing Throughput (how many tokens per second you can process).
+   * The "Limit": The model must fit inside a single GPU’s memory. If your
+     model is 20GB and your GPU only has 16GB, DP is impossible.
+
+  ---
+
+  2. Tensor Parallelism (TP): "The Large Object"
+  In TP, you take a single matrix multiplication and split it across your
+  GPUs.
+   * The Strategy: You split the Weights (the tensors).
+       * Example: For a Linear layer $Y = XW$, GPU 0 holds the left half of
+         $W$, and GPU 1 holds the right half.
+   * The Math: Both GPUs do the calculation simultaneously on the same data.
+     They then "merge" their partial results (All-Gather or All-Reduce)
+     during the forward pass.
+   * The "Why" (System Side): TP allows you to train models that are larger
+     than a single GPU. It also reduces Latency (the time it takes to
+     process a single token) because multiple chips are working on the same
+     calculation.
+   * The "Limit": TP requires massive communication bandwidth (like NVLink).
+     Because GPUs must talk during every layer, if your
+     internet/interconnect is slow, TP will be much slower than DP.
